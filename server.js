@@ -1,72 +1,111 @@
-const express = require("express");
-const ffmpeg = require("fluent-ffmpeg");
-const cors = require("cors");
-const app = express();
+const express = require("express")
+const ffmpeg = require("fluent-ffmpeg")
+const cors = require("cors")
+const fs = require("fs").promises
+const path = require("path")
 
-app.use(cors());
+const app = express()
+
+const AUDIO_DIR = path.join(__dirname, "french_in_action_audio")
+const VIDEO_DIR = path.join(__dirname, "processed")
+const MAX_FFMPEG_TIME = 60000
+
+app.use(cors())
+
+async function ensureDirs() {
+  await fs.mkdir(AUDIO_DIR, { recursive: true })
+  await fs.mkdir(VIDEO_DIR, { recursive: true })
+}
+
+ensureDirs()
 
 app.get("/", (req, res) => {
-    res.json({ message: "Hello world!" });
-});
+  res.json({
+    message: "Local media processing server",
+    endpoints: ["/screenshot", "/audio"]
+  })
+})
 
-app.get("/screenshot", (req, res) => {
-    const { url, timestamp } = req.query;
+app.get("/screenshot", async (req, res) => {
+  const id = req.query.id
+  const timestamp = req.query.timestamp
 
-    if (!url) {
-        return res.status(400).json({ error: "Missing url" });
+  if (!id) return res.status(400).json({ error: "Missing id" })
+  if (timestamp == null) return res.status(400).json({ error: "Missing timestamp" })
+
+  const time = parseFloat(timestamp)
+  if (isNaN(time)) return res.status(400).json({ error: "Invalid timestamp" })
+
+  const seekTime = time / 2
+  const videoPath = path.join(VIDEO_DIR, `${id}.mp4`)
+
+  try {
+    await fs.access(videoPath)
+  } catch {
+    return res.status(404).json({ error: "Video not found" })
+  }
+
+  res.contentType("image/png")
+
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Processing timeout" })
     }
+  }, MAX_FFMPEG_TIME)
 
+  ffmpeg(videoPath)
+    .seekInput(seekTime)
+    .frames(1)
+    .format("image2")
+    .on("error", err => {
+      clearTimeout(timeout)
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message })
+      }
+    })
+    .on("end", () => clearTimeout(timeout))
+    .pipe(res, { end: true })
+})
 
-    const seekTime = timestamp || "00:00:00";
+app.get("/audio", async (req, res) => {
+  const id = req.query.id
+  const timestamp = req.query.timestamp || "00:00:00"
+  const duration = req.query.duration ? parseFloat(req.query.duration) : null
 
-    res.contentType("image/png");
+  if (!id) return res.status(400).json({ error: "Missing id" })
 
-    ffmpeg(url)
-        .seekInput(seekTime)
-        .frames(1)
-        .format("image2")
-        .on("error", (err) => {
-            console.error("FFmpeg error:", err);
+  const audioPath = path.join(AUDIO_DIR, `${id}.mp3`)
 
-            if (!res.headersSent) {
-                res.status(500).json({ error: "Failed to capture screenshot", details: err.message });
-            }
-        })
-        .pipe(res, { end: true });
-});
+  try {
+    await fs.access(audioPath)
+  } catch {
+    return res.status(404).json({ error: "Audio not found" })
+  }
 
-app.get("/audio", (req, res) => {
-    const { url, timestamp, duration } = req.query;
+  res.contentType("audio/mpeg")
 
-    if (!url) {
-        return res.status(400).json({ error: "Missing video ID (url) parameter" });
+  const timeout = setTimeout(() => {
+    if (!res.headersSent) {
+      res.status(500).json({ error: "Processing timeout" })
     }
+  }, MAX_FFMPEG_TIME)
 
+  let cmd = ffmpeg(audioPath).seekInput(timestamp)
+  if (duration) cmd = cmd.duration(duration)
 
-    const seekTime = timestamp || "00:00:00";
-    const audioDuration = duration ? parseFloat(duration) : null;
+  cmd
+    .format("mp3")
+    .on("error", err => {
+      clearTimeout(timeout)
+      if (!res.headersSent) {
+        res.status(500).json({ error: err.message })
+      }
+    })
+    .on("end", () => clearTimeout(timeout))
+    .pipe(res, { end: true })
+})
 
-    res.contentType("audio/mpeg");
-
-    let command = ffmpeg(url)
-        .seekInput(seekTime);
-
-    if (audioDuration) {
-        command = command.duration(audioDuration);
-    }
-
-    command
-        .format("mp3")
-        .on("error", (err) => {
-            console.error("FFmpeg error:", err);
-            if (!res.headersSent) {
-                res.status(500).json({ error: "Failed to extract audio", details: err.message });
-            }
-        })
-        .pipe(res, { end: true });
-});
-
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 3001
 app.listen(PORT, () => {
-    console.log(`Server is running on port ${PORT}`);
-});
+  console.log(`Server running on ${PORT}`)
+})
